@@ -1,0 +1,69 @@
+name: Monthly Analysis Artifact Cleanup
+
+on:
+  schedule:
+    # GitHub cron uses UTC, so run on the possible previous UTC dates
+    # and gate by Asia/Shanghai local time below.
+    - cron: '0 18 28-31 * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check monthly window
+        id: window
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          local_day="$(TZ=Asia/Shanghai date +%d)"
+          local_hour="$(TZ=Asia/Shanghai date +%H)"
+          if [ "$local_day" = "01" ] && [ "$local_hour" = "02" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skip: local time is not 02:00 on the 1st day in Asia/Shanghai."
+          fi
+
+      - name: Delete last month's analysis artifacts
+        if: steps.window.outputs.run == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const now = new Date();
+            const shanghai = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+            const targetYear = shanghai.getMonth() === 0 ? shanghai.getFullYear() - 1 : shanghai.getFullYear();
+            const targetMonth = shanghai.getMonth() === 0 ? 12 : shanghai.getMonth();
+
+            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+
+            const targetArtifacts = artifacts.filter((artifact) => {
+              if (!artifact.name || !artifact.name.startsWith('analysis-reports-')) {
+                return false;
+              }
+              const createdAt = new Date(artifact.created_at);
+              const createdShanghai = new Date(createdAt.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+              return createdShanghai.getFullYear() === targetYear && (createdShanghai.getMonth() + 1) === targetMonth;
+            });
+
+            core.info('Found ' + targetArtifacts.length + ' analysis artifacts for ' + targetYear + '-' + String(targetMonth).padStart(2, '0'));
+
+            for (const artifact of targetArtifacts) {
+              core.info('Deleting artifact ' + artifact.name + ' (#' + artifact.id + ') created at ' + artifact.created_at);
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+            }
