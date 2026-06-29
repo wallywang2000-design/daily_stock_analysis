@@ -1,0 +1,66 @@
+name: Monthly Upstream Sync
+
+on:
+  schedule:
+    # Runs at about 01:00 on the 1st day of each month in Asia/Shanghai.
+    # GitHub cron is UTC, so this checks late UTC dates and gates by local day.
+    - cron: '0 17 28-31 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monthly-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check monthly window
+        id: window
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          local_day="$(TZ=Asia/Shanghai date +%d)"
+          local_hour="$(TZ=Asia/Shanghai date +%H)"
+          if [ "$local_day" = "01" ] && [ "$local_hour" = "01" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skip: local time is not the monthly 01:00 Asia/Shanghai window."
+          fi
+
+      - name: Checkout fork
+        if: steps.window.outputs.run == 'true'
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream main
+        if: steps.window.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/ZhuLinsen/daily_stock_analysis.git
+          git fetch upstream main
+
+          before="$(git rev-parse HEAD)"
+          git merge --no-edit upstream/main
+          after="$(git rev-parse HEAD)"
+
+          if [ "$before" = "$after" ]; then
+            echo "Fork is already up to date with upstream/main."
+            exit 0
+          fi
+
+          git push origin HEAD:main
