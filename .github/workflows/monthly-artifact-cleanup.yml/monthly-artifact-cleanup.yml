@@ -1,0 +1,50 @@
+name: Monthly Analysis Artifact Cleanup
+
+on:
+  schedule:
+    # Runs at 02:00 on the 1st day of each month in Asia/Shanghai.
+    # GitHub cron uses UTC.
+    - cron: '0 18 31 * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete last month's analysis artifacts
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const now = new Date();
+            const shanghai = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+            const targetYear = shanghai.getMonth() === 0 ? shanghai.getFullYear() - 1 : shanghai.getFullYear();
+            const targetMonth = shanghai.getMonth() === 0 ? 12 : shanghai.getMonth();
+
+            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+
+            const targetArtifacts = artifacts.filter((artifact) => {
+              if (!artifact.name || !artifact.name.startsWith('analysis-reports-')) {
+                return false;
+              }
+              const createdAt = new Date(artifact.created_at);
+              const createdShanghai = new Date(createdAt.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+              return createdShanghai.getFullYear() === targetYear && (createdShanghai.getMonth() + 1) === targetMonth;
+            });
+
+            core.info('Found ' + targetArtifacts.length + ' analysis artifacts for ' + targetYear + '-' + String(targetMonth).padStart(2, '0'));
+
+            for (const artifact of targetArtifacts) {
+              core.info('Deleting artifact ' + artifact.name + ' (#' + artifact.id + ') created at ' + artifact.created_at);
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+            }
