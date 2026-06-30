@@ -2907,6 +2907,7 @@ class StockAnalysisPipeline:
             )
         
         results: List[AnalysisResult] = []
+        failed_items: List[Tuple[str, str]] = []
         
         # 使用线程池并发处理
         # 注意：max_workers 设置较低（默认3）以避免触发反爬
@@ -2939,10 +2940,15 @@ class StockAnalysisPipeline:
                                 fallback_code=code,
                             )
                     elif result and not result.success:
+                        failure_reason = result.error_message or '未知原因'
+                        failed_items.append((code, failure_reason))
                         logger.warning(
                             f"[{code}] 分析结果标记为失败，不计入汇总: "
-                            f"{result.error_message or '未知原因'}"
+                            f"{failure_reason}"
                         )
+                    else:
+                        failed_items.append((code, '未返回分析结果'))
+                        logger.warning(f"[{code}] 未返回分析结果，不计入汇总")
 
                     # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
                     if idx < len(stock_codes) - 1 and analysis_delay > 0:
@@ -2954,6 +2960,7 @@ class StockAnalysisPipeline:
                         time.sleep(analysis_delay)
 
                 except Exception as e:
+                    failed_items.append((code, str(e) or e.__class__.__name__))
                     logger.error(f"[{code}] 任务执行失败: {e}")
         
         # 统计
@@ -2979,6 +2986,29 @@ class StockAnalysisPipeline:
         
         logger.info("===== 分析完成 =====")
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
+
+        if failed_items and send_notification and not dry_run:
+            failure_lines = [
+                "# ⚠️ 股票分析失败摘要",
+                "",
+                f"> 本次计划分析 {len(stock_codes)} 只，成功 {success_count} 只，失败 {len(failed_items)} 只。",
+                "",
+            ]
+            for failed_code, reason in failed_items:
+                clean_reason = str(reason or '未知原因').replace('\n', ' ').strip()[:180]
+                failure_lines.append(f"- **{failed_code}**: {clean_reason}")
+            failure_lines.extend(["", f"*{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"])
+            try:
+                if self.notifier.send(
+                    "\n".join(failure_lines),
+                    route_type="report",
+                    severity="warning",
+                ):
+                    logger.info("失败股票摘要推送成功")
+                else:
+                    logger.warning("失败股票摘要推送失败")
+            except Exception as e:
+                logger.warning("失败股票摘要推送异常: %s", e)
         
         # 保存报告到本地文件（无论是否推送通知都保存）
         if results and not dry_run:
