@@ -73,11 +73,20 @@ jobs:
           LOCAL_CLI_BACKEND_MAX_CONCURRENCY: ${{ vars.LOCAL_CLI_BACKEND_MAX_CONCURRENCY || secrets.LOCAL_CLI_BACKEND_MAX_CONCURRENCY }}
           AGENT_GENERATION_BACKEND: ${{ vars.AGENT_GENERATION_BACKEND || secrets.AGENT_GENERATION_BACKEND }}
           # LITELLM_CONFIG
-          LITELLM_CONFIG: ''
-          LITELLM_CONFIG_YAML: ''
+          LITELLM_CONFIG: 'data/gemini-routing-1029.yaml'
+          LITELLM_CONFIG_YAML: |
+            model_list:
+              - model_name: gemini-original
+                litellm_params:
+                  model: gemini/gemini-3.6-flash
+                  api_key: os.environ/GEMINI_API_KEY
+              - model_name: gemini-wally-backup
+                litellm_params:
+                  model: gemini/gemini-3.6-flash
+                  api_key: os.environ/GEMINI_WALLY_BACKUP_KEY
           LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
-          LITELLM_MODEL: 'gemini/gemini-3-flash-preview'
-          LITELLM_FALLBACK_MODELS: 'gemini/gemini-3.6-flash'
+          LITELLM_MODEL: 'gemini-original'
+          LITELLM_FALLBACK_MODELS: 'gemini-wally-backup'
           AGENT_LITELLM_MODEL: ${{ vars.AGENT_LITELLM_MODEL || secrets.AGENT_LITELLM_MODEL }}
           VISION_MODEL: ${{ vars.VISION_MODEL || secrets.VISION_MODEL }}
           OPENAI_VISION_MODEL: ${{ vars.OPENAI_VISION_MODEL || secrets.OPENAI_VISION_MODEL }}
@@ -88,14 +97,15 @@ jobs:
           LLM_PROMPT_CACHE_TELEMETRY_ENABLED: ${{ vars.LLM_PROMPT_CACHE_TELEMETRY_ENABLED || secrets.LLM_PROMPT_CACHE_TELEMETRY_ENABLED }}
           LLM_PROMPT_CACHE_HINTS_ENABLED: ${{ vars.LLM_PROMPT_CACHE_HINTS_ENABLED || secrets.LLM_PROMPT_CACHE_HINTS_ENABLED }}
           LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL: ${{ vars.LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL || secrets.LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL }}
-          # Original key keeps the preview model; Wally is a separate 3.6 Flash fallback.
-          LLM_CHANNELS: 'primary,secondary'
+          # YAML aliases keep the original key primary and Wally as backup on the same 3.6 model.
+          LLM_CHANNELS: ''
 
           # Gemini AI（主选）
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_WALLY_BACKUP_KEY: ${{ secrets.GEMINI_WALLY_BACKUP_KEY }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
-          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
+          GEMINI_MODEL: 'gemini-3.6-flash'
+          GEMINI_MODEL_FALLBACK: 'gemini-3.6-flash'
           GEMINI_REQUEST_DELAY: '3.0'
           
           # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
@@ -121,7 +131,7 @@ jobs:
           LLM_PRIMARY_BASE_URL: ''
           LLM_PRIMARY_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LLM_PRIMARY_API_KEYS: ''
-          LLM_PRIMARY_MODELS: 'gemini/gemini-3-flash-preview'
+          LLM_PRIMARY_MODELS: 'gemini/gemini-3.6-flash'
           LLM_PRIMARY_ENABLED: 'true'
           LLM_PRIMARY_EXTRA_HEADERS: ''
 
