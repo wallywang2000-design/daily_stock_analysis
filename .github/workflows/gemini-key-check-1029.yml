@@ -8,58 +8,70 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Compare and test keys without revealing credentials
+      - name: Inspect model availability and test free model candidates
         env:
-          CURRENT_KEY: ${{ secrets.GEMINI_API_KEY }}
-          CHECK_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
-          CANDIDATE_KEYS: ${{ secrets.GEMINI_BACKUP_API_KEYS }}
+          EXISTING_KEY: ${{ secrets.GEMINI_API_KEY }}
+          WALLY_KEY: ${{ secrets.GEMINI_WALLY_BACKUP_KEY }}
         run: |
           python3 - <<'PY'
-          import os, json, urllib.request, urllib.error, concurrent.futures, hmac
-          model = os.environ['CHECK_MODEL']
-          current = os.environ.get('CURRENT_KEY', '').strip()
-          candidates = [k.strip() for k in os.environ.get('CANDIDATE_KEYS','').split(',') if k.strip()]
-          labels = ['Darmy', 'Wally']
-          keys = {'Existing': current, **dict(zip(labels, candidates))}
-          rows = ['# Gemini key verification', '', '## Existing secret comparison']
-          for label, key in zip(labels, candidates):
-              row = label + ': matches existing GEMINI_API_KEY = ' + str(bool(current) and hmac.compare_digest(current, key))
-              print(row, flush=True)
-              rows.append('- ' + row)
-          def test(item):
-              label, key, endpoint = item
-              if not key: return (label, endpoint, 'missing', 'No key configured')
-              if endpoint == 'openai':
-                  url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
-                  body = {'model':model,'messages':[{'role':'user','content':'Reply OK only.'}],'max_tokens':128}
-                  headers = {'Authorization':'Bearer '+key,'Content-Type':'application/json'}
-              else:
-                  url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent'
-                  body = {'contents':[{'parts':[{'text':'Reply OK only.'}]}],'generationConfig':{'maxOutputTokens':128}}
-                  headers = {'x-goog-api-key':key,'Content-Type':'application/json'}
-              req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
+          import os, json, time, urllib.request, urllib.error, concurrent.futures
+          keys = {'Existing':os.environ.get('EXISTING_KEY','').strip(),'Wally':os.environ.get('WALLY_KEY','').strip()}
+          models = ['gemini-3.8-flash','gemini-3.6-flash','gemini-2.5-pro']
+          rows = ['# Gemini free model availability check', '', 'Model visibility does not prove free-tier quota or billing status.', '']
+          def request(key,url,body=None,compat=False):
+              headers={'Content-Type':'application/json'}
+              headers.update({'Authorization':'Bearer '+key} if compat else {'x-goog-api-key':key})
+              req=urllib.request.Request(url,data=json.dumps(body).encode() if body is not None else None,headers=headers)
               try:
-                  with urllib.request.urlopen(req, timeout=45) as response:
-                      json.load(response)
-                      return (label, endpoint, str(response.status), 'SUCCESS')
+                  with urllib.request.urlopen(req,timeout=75) as response:
+                      return response.status,json.load(response)
               except urllib.error.HTTPError as error:
-                  raw = error.read().decode()
+                  raw=error.read().decode()
                   for secret in keys.values():
-                      if secret: raw = raw.replace(secret,'[REDACTED]')
+                      if secret: raw=raw.replace(secret,'[REDACTED]')
                   try:
-                      parsed = json.loads(raw)
+                      parsed=json.loads(raw)
                       if isinstance(parsed,list): parsed=parsed[0]
-                      message = parsed.get('error',{}).get('message','Request rejected')
-                  except Exception: message='Request rejected'
-                  return (label, endpoint, str(error.code), message[:800])
+                      message=parsed.get('error',{}).get('message','Rejected')
+                  except Exception: message='Rejected'
+                  return error.code,{'error':str(message)[:900]}
               except Exception as error:
-                  return (label, endpoint, 'network error', type(error).__name__)
-          rows += ['', '## API test: ' + model, '', '| Key label | Endpoint | HTTP | Result |', '|---|---|---|---|']
-          tasks = [(label,key,endpoint) for label,key in keys.items() for endpoint in ('openai','native')]
-          with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-              for label,endpoint,status,message in pool.map(test,tasks):
-                  print(json.dumps({'key_label':label,'endpoint':endpoint,'http':status,'result':message}), flush=True)
-                  rows.append('| '+ ' | '.join([label,endpoint,status,message.replace('|','/').replace('\n',' ')])+' |')
+                  return 0,{'error':type(error).__name__}
+          for label,key in keys.items():
+              status,data=request(key,'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000')
+              available=[m['name'].removeprefix('models/') for m in data.get('models',[]) if 'generateContent' in m.get('supportedGenerationMethods',[]) and 'gemini' in m.get('name','')]
+              print(json.dumps({'key_label':label,'list_http':status,'visible_text_models':available,'error':data.get('error')},ensure_ascii=False),flush=True)
+              rows += ['## '+label+' visible text models (HTTP '+str(status)+')','',', '.join(available) or str(data.get('error','No models')), '']
+          def test(item):
+              label,key,model,endpoint=item
+              started=time.monotonic()
+              if endpoint=='native':
+                  url='https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent'
+                  body={'contents':[{'parts':[{'text':'Return only this JSON object: {"ok":true}'}]}],'generationConfig':{'maxOutputTokens':2048,'responseMimeType':'application/json'}}
+              else:
+                  url='https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
+                  body={'model':model,'messages':[{'role':'user','content':'Return only this JSON object: {"ok":true}'}],'max_tokens':2048,'response_format':{'type':'json_object'}}
+              status,data=request(key,url,body,endpoint=='openai')
+              if endpoint=='native':
+                  candidates=data.get('candidates',[])
+                  text=''.join(p.get('text','') for p in (candidates[0].get('content',{}).get('parts',[]) if candidates else []) if not p.get('thought'))
+                  actual=data.get('modelVersion','')
+              else:
+                  choices=data.get('choices',[])
+                  text=choices[0].get('message',{}).get('content','') if choices else ''
+                  actual=data.get('model','')
+              try: valid=json.loads(text).get('ok') is True
+              except Exception: valid=False
+              result={'key_label':label,'requested_model':model,'endpoint':endpoint,'http':status,'actual_model':actual,'valid_json_reply':valid,'seconds':round(time.monotonic()-started,2),'error':data.get('error')}
+              return result
+          tasks=[(label,key,model,'native') for label,key in keys.items() for model in models]
+          tasks += [(label,key,'gemini-3.8-flash','openai') for label,key in keys.items()]
+          rows += ['## Minimal API calls','','| Key | Requested model | Endpoint | HTTP | Actual model | Valid reply | Seconds | Error |','|---|---|---|---|---|---|---|---|']
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              for result in pool.map(test,tasks):
+                  print(json.dumps(result,ensure_ascii=False),flush=True)
+                  values=[result[k] for k in ('key_label','requested_model','endpoint','http','actual_model','valid_json_reply','seconds','error')]
+                  rows.append('| '+' | '.join(str(v or '').replace('|','/').replace('\n',' ') for v in values)+' |')
           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
               summary.write('\n'.join(rows)+'\n')
           PY
