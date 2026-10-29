@@ -6,72 +6,153 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Inspect model availability and test free model candidates
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install project dependencies
+        run: pip install -r requirements.txt
+      - name: Verify model isolation and real Wally fallback
         env:
-          EXISTING_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WALLY_KEY: ${{ secrets.GEMINI_WALLY_BACKUP_KEY }}
+          VERIFY_EXISTING_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VERIFY_WALLY_KEY: ${{ secrets.GEMINI_WALLY_BACKUP_KEY }}
         run: |
           python3 - <<'PY'
-          import os, json, time, urllib.request, urllib.error, concurrent.futures
-          keys = {'Existing':os.environ.get('EXISTING_KEY','').strip(),'Wally':os.environ.get('WALLY_KEY','').strip()}
-          models = ['gemini-3.8-flash','gemini-3.6-flash','gemini-2.5-pro']
-          rows = ['# Gemini free model availability check', '', 'Model visibility does not prove free-tier quota or billing status.', '']
-          def request(key,url,body=None,compat=False):
-              headers={'Content-Type':'application/json'}
-              headers.update({'Authorization':'Bearer '+key} if compat else {'x-goog-api-key':key})
-              req=urllib.request.Request(url,data=json.dumps(body).encode() if body is not None else None,headers=headers)
-              try:
-                  with urllib.request.urlopen(req,timeout=75) as response:
-                      return response.status,json.load(response)
-              except urllib.error.HTTPError as error:
-                  raw=error.read().decode()
-                  for secret in keys.values():
-                      if secret: raw=raw.replace(secret,'[REDACTED]')
-                  try:
-                      parsed=json.loads(raw)
-                      if isinstance(parsed,list): parsed=parsed[0]
-                      message=parsed.get('error',{}).get('message','Rejected')
-                  except Exception: message='Rejected'
-                  return error.code,{'error':str(message)[:900]}
-              except Exception as error:
-                  return 0,{'error':type(error).__name__}
-          for label,key in keys.items():
-              status,data=request(key,'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000')
-              available=[m['name'].removeprefix('models/') for m in data.get('models',[]) if 'generateContent' in m.get('supportedGenerationMethods',[]) and 'gemini' in m.get('name','')]
-              print(json.dumps({'key_label':label,'list_http':status,'visible_text_models':available,'error':data.get('error')},ensure_ascii=False),flush=True)
-              rows += ['## '+label+' visible text models (HTTP '+str(status)+')','',', '.join(available) or str(data.get('error','No models')), '']
-          def test(item):
-              label,key,model,endpoint=item
-              started=time.monotonic()
-              if endpoint=='native':
-                  url='https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent'
-                  body={'contents':[{'parts':[{'text':'Return only this JSON object: {"ok":true}'}]}],'generationConfig':{'maxOutputTokens':2048,'responseMimeType':'application/json'}}
-              else:
-                  url='https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
-                  body={'model':model,'messages':[{'role':'user','content':'Return only this JSON object: {"ok":true}'}],'max_tokens':2048,'response_format':{'type':'json_object'}}
-              status,data=request(key,url,body,endpoint=='openai')
-              if endpoint=='native':
-                  candidates=data.get('candidates',[])
-                  text=''.join(p.get('text','') for p in (candidates[0].get('content',{}).get('parts',[]) if candidates else []) if not p.get('thought'))
-                  actual=data.get('modelVersion','')
-              else:
-                  choices=data.get('choices',[])
-                  text=choices[0].get('message',{}).get('content','') if choices else ''
-                  actual=data.get('model','')
-              try: valid=json.loads(text).get('ok') is True
-              except Exception: valid=False
-              result={'key_label':label,'requested_model':model,'endpoint':endpoint,'http':status,'actual_model':actual,'valid_json_reply':valid,'seconds':round(time.monotonic()-started,2),'error':data.get('error')}
-              return result
-          tasks=[(label,key,model,'native') for label,key in keys.items() for model in models]
-          tasks += [(label,key,'gemini-3.8-flash','openai') for label,key in keys.items()]
-          rows += ['## Minimal API calls','','| Key | Requested model | Endpoint | HTTP | Actual model | Valid reply | Seconds | Error |','|---|---|---|---|---|---|---|---|']
-          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-              for result in pool.map(test,tasks):
-                  print(json.dumps(result,ensure_ascii=False),flush=True)
-                  values=[result[k] for k in ('key_label','requested_model','endpoint','http','actual_model','valid_json_reply','seconds','error')]
-                  rows.append('| '+' | '.join(str(v or '').replace('|','/').replace('\n',' ') for v in values)+' |')
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
-              summary.write('\n'.join(rows)+'\n')
+          import os, json, hmac, sys, yaml
+          from pathlib import Path
+          workflow=yaml.safe_load(Path('.github/workflows/new-action-1029.yml').read_text())
+          source=next(step['env'] for step in workflow['jobs']['analyze']['steps'] if step.get('name')=='执行股票分析')
+          existing=os.environ['VERIFY_EXISTING_KEY']
+          wally=os.environ['VERIFY_WALLY_KEY']
+          values={'
+          names=['LITELLM_CONFIG','LITELLM_CONFIG_YAML','LITELLM_MODEL','LITELLM_FALLBACK_MODELS','LLM_CHANNELS']
+          names += [name for name in source if name.startswith(('LLM_PRIMARY_','LLM_SECONDARY_'))]
+          for name in names:
+              value=str(source[name])
+              os.environ[name]=values.get(value,value)
+          from src.config import Config
+          from src.analyzer import GeminiAnalyzer
+          config=Config.get_instance()
+          primary='gemini/gemini-3-flash-preview'
+          backup='gemini/gemini-3.6-flash'
+          assert config.litellm_model==primary
+          assert config.litellm_fallback_models==[backup]
+          deployments={entry['model_name']:entry['litellm_params'] for entry in config.llm_model_list}
+          assert set(deployments)=={primary,backup}
+          assert hmac.compare_digest(deployments[primary]['api_key'],existing)
+          assert hmac.compare_digest(deployments[backup]['api_key'],wally)
+          summary=['# Per-key model routing verification','','- Original key: '+primary,'- Wally key: '+backup,'- Model and key isolation: PASS','']
+          print('Production workflow model/key isolation: PASS',flush=True)
+          analyzer=GeminiAnalyzer(config=config,skills=[])
+          assert analyzer._router is not None
+          real_completion=analyzer._router.completion
+          calls=[]
+          def simulate_primary_failure(**kwargs):
+              calls.append(kwargs['model'])
+              if kwargs['model']==primary:
+                  raise RuntimeError('Intentional primary failure for fallback verification')
+              kwargs['timeout']=60
+              return real_completion(**kwargs)
+          analyzer._router.completion=simulate_primary_failure
+          try:
+              text,used_model,usage=analyzer._call_litellm_impl('Reply with OK only.',{'max_output_tokens':2048},system_prompt='This is an API availability test. Reply OK only.')
+              assert used_model==backup and bool(text.strip())
+              assert primary in calls and backup in calls
+              summary += ['- Simulated primary failure -> real Wally API call: PASS','- Actual fallback model: '+used_model,'- Nonempty reply: YES']
+              print(json.dumps({'fallback':'PASS','used_model':used_model,'nonempty_reply':True,'attempted_models':calls}),flush=True)
+          except Exception as error:
+              summary += ['- Real fallback request did not complete: '+type(error).__name__,'- Attempted models: '+', '.join(calls)]
+              print(json.dumps({'fallback':'NOT_CONFIRMED','error_type':type(error).__name__,'attempted_models':calls}),flush=True)
+              with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out: out.write('\n'.join(summary)+'\n')
+              sys.exit(1)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out: out.write('\n'.join(summary)+'\n')
+          PY
++'{{ secrets.GEMINI_API_KEY }}':existing,'
+          names=['LITELLM_CONFIG','LITELLM_CONFIG_YAML','LITELLM_MODEL','LITELLM_FALLBACK_MODELS','LLM_CHANNELS']
+          names += [name for name in source if name.startswith(('LLM_PRIMARY_','LLM_SECONDARY_'))]
+          for name in names:
+              value=str(source[name])
+              os.environ[name]=values.get(value,value)
+          from src.config import Config
+          from src.analyzer import GeminiAnalyzer
+          config=Config.get_instance()
+          primary='gemini/gemini-3-flash-preview'
+          backup='gemini/gemini-3.6-flash'
+          assert config.litellm_model==primary
+          assert config.litellm_fallback_models==[backup]
+          deployments={entry['model_name']:entry['litellm_params'] for entry in config.llm_model_list}
+          assert set(deployments)=={primary,backup}
+          assert hmac.compare_digest(deployments[primary]['api_key'],existing)
+          assert hmac.compare_digest(deployments[backup]['api_key'],wally)
+          summary=['# Per-key model routing verification','','- Original key: '+primary,'- Wally key: '+backup,'- Model and key isolation: PASS','']
+          print('Production workflow model/key isolation: PASS',flush=True)
+          analyzer=GeminiAnalyzer(config=config,skills=[])
+          assert analyzer._router is not None
+          real_completion=analyzer._router.completion
+          calls=[]
+          def simulate_primary_failure(**kwargs):
+              calls.append(kwargs['model'])
+              if kwargs['model']==primary:
+                  raise RuntimeError('Intentional primary failure for fallback verification')
+              kwargs['timeout']=60
+              return real_completion(**kwargs)
+          analyzer._router.completion=simulate_primary_failure
+          try:
+              text,used_model,usage=analyzer._call_litellm_impl('Reply with OK only.',{'max_output_tokens':2048},system_prompt='This is an API availability test. Reply OK only.')
+              assert used_model==backup and bool(text.strip())
+              assert primary in calls and backup in calls
+              summary += ['- Simulated primary failure -> real Wally API call: PASS','- Actual fallback model: '+used_model,'- Nonempty reply: YES']
+              print(json.dumps({'fallback':'PASS','used_model':used_model,'nonempty_reply':True,'attempted_models':calls}),flush=True)
+          except Exception as error:
+              summary += ['- Real fallback request did not complete: '+type(error).__name__,'- Attempted models: '+', '.join(calls)]
+              print(json.dumps({'fallback':'NOT_CONFIRMED','error_type':type(error).__name__,'attempted_models':calls}),flush=True)
+              with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out: out.write('\n'.join(summary)+'\n')
+              sys.exit(1)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out: out.write('\n'.join(summary)+'\n')
+          PY
++'{{ secrets.GEMINI_WALLY_BACKUP_KEY }}':wally}
+          names=['LITELLM_CONFIG','LITELLM_CONFIG_YAML','LITELLM_MODEL','LITELLM_FALLBACK_MODELS','LLM_CHANNELS']
+          names += [name for name in source if name.startswith(('LLM_PRIMARY_','LLM_SECONDARY_'))]
+          for name in names:
+              value=str(source[name])
+              os.environ[name]=values.get(value,value)
+          from src.config import Config
+          from src.analyzer import GeminiAnalyzer
+          config=Config.get_instance()
+          primary='gemini/gemini-3-flash-preview'
+          backup='gemini/gemini-3.6-flash'
+          assert config.litellm_model==primary
+          assert config.litellm_fallback_models==[backup]
+          deployments={entry['model_name']:entry['litellm_params'] for entry in config.llm_model_list}
+          assert set(deployments)=={primary,backup}
+          assert hmac.compare_digest(deployments[primary]['api_key'],existing)
+          assert hmac.compare_digest(deployments[backup]['api_key'],wally)
+          summary=['# Per-key model routing verification','','- Original key: '+primary,'- Wally key: '+backup,'- Model and key isolation: PASS','']
+          print('Production workflow model/key isolation: PASS',flush=True)
+          analyzer=GeminiAnalyzer(config=config,skills=[])
+          assert analyzer._router is not None
+          real_completion=analyzer._router.completion
+          calls=[]
+          def simulate_primary_failure(**kwargs):
+              calls.append(kwargs['model'])
+              if kwargs['model']==primary:
+                  raise RuntimeError('Intentional primary failure for fallback verification')
+              kwargs['timeout']=60
+              return real_completion(**kwargs)
+          analyzer._router.completion=simulate_primary_failure
+          try:
+              text,used_model,usage=analyzer._call_litellm_impl('Reply with OK only.',{'max_output_tokens':2048},system_prompt='This is an API availability test. Reply OK only.')
+              assert used_model==backup and bool(text.strip())
+              assert primary in calls and backup in calls
+              summary += ['- Simulated primary failure -> real Wally API call: PASS','- Actual fallback model: '+used_model,'- Nonempty reply: YES']
+              print(json.dumps({'fallback':'PASS','used_model':used_model,'nonempty_reply':True,'attempted_models':calls}),flush=True)
+          except Exception as error:
+              summary += ['- Real fallback request did not complete: '+type(error).__name__,'- Attempted models: '+', '.join(calls)]
+              print(json.dumps({'fallback':'NOT_CONFIRMED','error_type':type(error).__name__,'attempted_models':calls}),flush=True)
+              with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out: out.write('\n'.join(summary)+'\n')
+              sys.exit(1)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out: out.write('\n'.join(summary)+'\n')
           PY
