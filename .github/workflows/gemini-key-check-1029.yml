@@ -11,10 +11,12 @@ jobs:
       - name: Compare and test keys without revealing credentials
         env:
           CURRENT_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CHECK_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
           CANDIDATE_KEYS: ${{ secrets.GEMINI_BACKUP_API_KEYS }}
         run: |
           python3 - <<'PY'
           import os, json, urllib.request, urllib.error, concurrent.futures, hmac
+          model = os.environ['CHECK_MODEL']
           current = os.environ.get('CURRENT_KEY', '').strip()
           candidates = [k.strip() for k in os.environ.get('CANDIDATE_KEYS','').split(',') if k.strip()]
           labels = ['Darmy', 'Wally']
@@ -29,10 +31,10 @@ jobs:
               if not key: return (label, endpoint, 'missing', 'No key configured')
               if endpoint == 'openai':
                   url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
-                  body = {'model':'gemini-3.6-flash','messages':[{'role':'user','content':'Reply OK only.'}],'max_tokens':128}
+                  body = {'model':model,'messages':[{'role':'user','content':'Reply OK only.'}],'max_tokens':128}
                   headers = {'Authorization':'Bearer '+key,'Content-Type':'application/json'}
               else:
-                  url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent'
+                  url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent'
                   body = {'contents':[{'parts':[{'text':'Reply OK only.'}]}],'generationConfig':{'maxOutputTokens':128}}
                   headers = {'x-goog-api-key':key,'Content-Type':'application/json'}
               req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
@@ -52,7 +54,7 @@ jobs:
                   return (label, endpoint, str(error.code), message[:800])
               except Exception as error:
                   return (label, endpoint, 'network error', type(error).__name__)
-          rows += ['', '## API test: gemini-3.6-flash', '', '| Key label | Endpoint | HTTP | Result |', '|---|---|---|---|']
+          rows += ['', '## API test: ' + model, '', '| Key label | Endpoint | HTTP | Result |', '|---|---|---|---|']
           tasks = [(label,key,endpoint) for label,key in keys.items() for endpoint in ('openai','native')]
           with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
               for label,endpoint,status,message in pool.map(test,tasks):
