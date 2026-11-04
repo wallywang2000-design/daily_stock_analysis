@@ -1,69 +1,67 @@
-name: Monthly Analysis Artifact Cleanup
+name: Weekly Analysis Cleanup
 
 on:
   schedule:
-    # GitHub cron uses UTC, so run on the possible previous UTC dates
-    # and gate by Asia/Shanghai local time below.
-    - cron: '0 18 28-31 * *'
+    # Saturday 03:00 Asia/Shanghai = Friday 19:00 UTC; GitHub may delay execution.
+    - cron: '0 19 * * 5'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview only (do not delete records or artifacts)'
+        type: boolean
+        required: true
+        default: true
 
+# Reuse the existing cleanup permission; no credentials are required.
 permissions:
   actions: write
+
+concurrency:
+  group: analysis-history-cleanup
+  cancel-in-progress: false
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Check monthly window
-        id: window
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          local_day="$(TZ=Asia/Shanghai date +%d)"
-          local_hour="$(TZ=Asia/Shanghai date +%H)"
-          if [ "$local_day" = "01" ] && [ "$local_hour" = "02" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Skip: local time is not 02:00 on the 1st day in Asia/Shanghai."
-          fi
-
-      - name: Delete last month's analysis artifacts
-        if: steps.window.outputs.run == 'true'
+      # Only completed runs of the original and new stock analysis workflows are in scope.
+      # Delete records/logs and analysis report artifacts older than 5 x 24 hours.
+      # Recent reruns, active jobs, CI and other maintenance workflows are preserved.
+      - name: Clean analysis history older than five days
         uses: actions/github-script@v8
         with:
           script: |
-            const now = new Date();
-            const shanghai = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
-            const targetYear = shanghai.getMonth() === 0 ? shanghai.getFullYear() - 1 : shanghai.getFullYear();
-            const targetMonth = shanghai.getMonth() === 0 ? 12 : shanghai.getMonth();
-
-            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 100,
-            });
-
-            const targetArtifacts = artifacts.filter((artifact) => {
-              if (!artifact.name || !artifact.name.startsWith('analysis-reports-')) {
-                return false;
-              }
-              const createdAt = new Date(artifact.created_at);
-              const createdShanghai = new Date(createdAt.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
-              return createdShanghai.getFullYear() === targetYear && (createdShanghai.getMonth() + 1) === targetMonth;
-            });
-
-            core.info('Found ' + targetArtifacts.length + ' analysis artifacts for ' + targetYear + '-' + String(targetMonth).padStart(2, '0'));
-
+            const repo = { owner: context.repo.owner, repo: context.repo.repo };
+            const keepDays = 5;
+            const cutoff = Date.now() - keepDays * 24 * 60 * 60 * 1000;
+            const dryRun = context.eventName === 'workflow_dispatch' && context.payload.inputs?.dry_run !== 'false';
+            const analysisPaths = new Set([
+              '.github/workflows/00-daily-analysis.yml',
+              '.github/workflows/new-action-1029.yml',
+            ]);
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, { ...repo, per_page: 100 });
+            const analysisRuns = runs.filter(run => analysisPaths.has(run.path));
+            const completedIds = new Set(analysisRuns.filter(run => run.status === 'completed').map(run => run.id));
+            // Preserve active runs and any run created or updated within the last 120 hours.
+            const targetRuns = analysisRuns.filter(run => run.status === 'completed' &&
+              Date.parse(run.created_at) < cutoff && Date.parse(run.updated_at) < cutoff);
+            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, { ...repo, per_page: 100 });
+            const targetArtifacts = artifacts.filter(artifact =>
+              artifact.name?.startsWith('analysis-reports-') &&
+              completedIds.has(artifact.workflow_run?.id) && Date.parse(artifact.created_at) < cutoff);
+            core.info('Mode: ' + (dryRun ? 'PREVIEW ONLY' : 'DELETE') + '; cutoff: ' + new Date(cutoff).toISOString());
             for (const artifact of targetArtifacts) {
-              core.info('Deleting artifact ' + artifact.name + ' (#' + artifact.id + ') created at ' + artifact.created_at);
-              await github.rest.actions.deleteArtifact({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                artifact_id: artifact.id,
-              });
+              core.info((dryRun ? 'Would delete' : 'Deleting') + ' artifact #' + artifact.id + ' ' + artifact.name);
+              if (!dryRun) await github.rest.actions.deleteArtifact({ ...repo, artifact_id: artifact.id });
             }
+            for (const run of targetRuns) {
+              core.info((dryRun ? 'Would delete' : 'Deleting') + ' run #' + run.id + ' ' + run.name + ' created ' + run.created_at);
+              if (!dryRun) await github.rest.actions.deleteWorkflowRun({ ...repo, run_id: run.id });
+            }
+            await core.summary.addHeading('Weekly analysis cleanup')
+              .addRaw('Schedule: Saturday 03:00 Asia/Shanghai (Friday 19:00 UTC).\n\n')
+              .addTable([
+                [{ data: 'Mode', header: true }, { data: 'Cutoff (UTC)', header: true }, { data: 'Runs', header: true }, { data: 'Artifacts', header: true }],
+                [dryRun ? 'Preview only; nothing deleted' : 'Delete', new Date(cutoff).toISOString(), String(targetRuns.length), String(targetArtifacts.length)],
+              ]).write();
