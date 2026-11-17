@@ -84,9 +84,18 @@ jobs:
                 litellm_params:
                   model: gemini/gemini-3.6-flash
                   api_key: os.environ/GEMINI_WALLY_BACKUP_KEY
+              # Different free models also cover model-wide 503s and per-model quotas.
+              - model_name: gemini-original-38-fallback
+                litellm_params:
+                  model: gemini/gemini-3.8-flash
+                  api_key: os.environ/GEMINI_API_KEY
+              - model_name: gemini-wally-lite-fallback
+                litellm_params:
+                  model: gemini/gemini-3.5-flash-lite
+                  api_key: os.environ/GEMINI_WALLY_BACKUP_KEY
           LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
           LITELLM_MODEL: 'gemini-original'
-          LITELLM_FALLBACK_MODELS: 'gemini-wally-backup'
+          LITELLM_FALLBACK_MODELS: 'gemini-wally-backup,gemini-original-38-fallback,gemini-wally-lite-fallback'
           AGENT_LITELLM_MODEL: ${{ vars.AGENT_LITELLM_MODEL || secrets.AGENT_LITELLM_MODEL }}
           VISION_MODEL: ${{ vars.VISION_MODEL || secrets.VISION_MODEL }}
           OPENAI_VISION_MODEL: ${{ vars.OPENAI_VISION_MODEL || secrets.OPENAI_VISION_MODEL }}

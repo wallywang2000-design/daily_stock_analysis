@@ -20,7 +20,7 @@ jobs:
           cache: pip
       - name: Install project dependencies
         run: pip install -r requirements.txt
-      - name: Verify model isolation and real Wally fallback
+      - name: Verify model isolation and live fallback
         if: ${{ !inputs.probe_alternatives }}
         env:
           VERIFY_EXISTING_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -48,12 +48,16 @@ jobs:
           primary='gemini-original'
           backup='gemini-wally-backup'
           assert config.litellm_model==primary
-          assert config.litellm_fallback_models==[backup]
+          assert config.litellm_fallback_models==[backup,'gemini-original-38-fallback','gemini-wally-lite-fallback']
           deployments={entry['model_name']:entry['litellm_params'] for entry in config.llm_model_list}
-          assert set(deployments)=={primary,backup}
+          assert set(deployments)=={primary,backup,'gemini-original-38-fallback','gemini-wally-lite-fallback'}
           assert all(deployments[name]['model']=='gemini/gemini-3.6-flash' for name in (primary,backup))
           assert hmac.compare_digest(deployments[primary]['api_key'],existing)
           assert hmac.compare_digest(deployments[backup]['api_key'],wally)
+          assert deployments['gemini-original-38-fallback']['model']=='gemini/gemini-3.8-flash'
+          assert hmac.compare_digest(deployments['gemini-original-38-fallback']['api_key'],existing)
+          assert deployments['gemini-wally-lite-fallback']['model']=='gemini/gemini-3.5-flash-lite'
+          assert hmac.compare_digest(deployments['gemini-wally-lite-fallback']['api_key'],wally)
           summary=['# Per-key model routing verification','','- Original key: '+deployments[primary]['model'],'- Wally key: '+deployments[backup]['model'],'- Model and key isolation: PASS','']
           print('Production workflow model/key isolation: PASS',flush=True)
           analyzer=GeminiAnalyzer(config=config,skills=[])
@@ -69,9 +73,9 @@ jobs:
           analyzer._router.completion=simulate_primary_failure
           try:
               text,used_model,usage=analyzer._call_litellm_impl('Reply with OK only.',{'max_output_tokens':2048},system_prompt='This is an API availability test. Reply OK only.')
-              assert used_model==backup and bool(text.strip())
-              assert primary in calls and backup in calls
-              summary += ['- Simulated primary failure -> real Wally API call: PASS','- Actual fallback model: '+deployments[used_model]['model'],'- Nonempty reply: YES']
+              assert used_model in config.litellm_fallback_models and bool(text.strip())
+              assert primary in calls and used_model in calls
+              summary += ['- Simulated primary failure -> real fallback API call: PASS','- Actual fallback model: '+deployments[used_model]['model'],'- Nonempty reply: YES']
               print(json.dumps({'fallback':'PASS','used_model':used_model,'nonempty_reply':True,'attempted_models':calls}),flush=True)
           except Exception as error:
               summary += ['- Real fallback request did not complete: '+type(error).__name__,'- Attempted models: '+', '.join(calls)]
